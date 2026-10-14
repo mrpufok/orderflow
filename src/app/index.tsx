@@ -1,98 +1,199 @@
-import * as Device from 'expo-device';
-import { Platform, StyleSheet } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { AnimatedIcon } from '@/components/animated-icon';
-import { HintRow } from '@/components/hint-row';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { useState } from 'react';
+import {
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
-function getDevMenuHint() {
-  if (Platform.OS === 'web') {
-    return <ThemedText type="small">use browser devtools</ThemedText>;
-  }
-  if (Device.isDevice) {
-    return (
-      <ThemedText type="small">
-        shake device or press <ThemedText type="code">m</ThemedText> in terminal
-      </ThemedText>
-    );
-  }
-  const shortcut = Platform.OS === 'android' ? 'cmd+m (or ctrl+m)' : 'cmd+d';
-  return (
-    <ThemedText type="small">
-      press <ThemedText type="code">{shortcut}</ThemedText>
-    </ThemedText>
-  );
-}
+// Описываем структуру товара
+type Product = {
+  id: number;
+  name: string;
+  price: number;
+};
+
+// Первые тестовые товары
+const initialProducts: Product[] = [
+  { id: 1, name: 'Клавиатура', price: 1500 },
+  { id: 2, name: 'Компьютерная мышь', price: 900 },
+  { id: 3, name: 'Монитор', price: 12500 },
+];
 
 export default function HomeScreen() {
+  const [products, setProducts] =
+    useState<Product[]>(initialProducts);
+
+  // Добавление товара
+  function addProduct() {
+    const nextId =
+      Math.max(0, ...products.map((p) => p.id)) + 1;
+
+    const newProduct: Product = {
+      id: nextId,
+      name: `Новый товар ${nextId}`,
+      price: 990,
+    };
+
+    setProducts([...products, newProduct]);
+  }
+
+  // Удаление товара
+  function deleteProduct(id: number) {
+    setProducts(
+      products.filter((product) => product.id !== id)
+    );
+  }
+
   return (
-    <ThemedView style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
-        <ThemedView style={styles.heroSection}>
-          <AnimatedIcon />
-          <ThemedText type="title" style={styles.title}>
-            Welcome to&nbsp;Expo
-          </ThemedText>
-        </ThemedView>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.content}
+    >
+      <Text style={styles.title}>OrderFlow</Text>
+      <Text style={styles.subtitle}>
+        Система учёта заказов
+      </Text>
 
-        <ThemedText type="code" style={styles.code}>
-          get started
-        </ThemedText>
+      <View style={styles.summary}>
+        <Text style={styles.summaryLabel}>
+          Товаров в каталоге
+        </Text>
+        <Text style={styles.summaryNumber}>
+          {products.length}
+        </Text>
+      </View>
 
-        <ThemedView type="backgroundElement" style={styles.stepContainer}>
-          <HintRow
-            title="Try editing"
-            hint={<ThemedText type="code">src/app/index.tsx</ThemedText>}
-          />
-          <HintRow title="Dev tools" hint={getDevMenuHint()} />
-          <HintRow
-            title="Fresh start"
-            hint={<ThemedText type="code">npm run reset-project</ThemedText>}
-          />
-        </ThemedView>
+      <Pressable
+        style={styles.addButton}
+        onPress={addProduct}
+      >
+        <Text style={styles.addButtonText}>
+          + Добавить товар
+        </Text>
+      </Pressable>
 
-        {Platform.OS === 'web' && <WebBadge />}
-      </SafeAreaView>
-    </ThemedView>
+      <Text style={styles.sectionTitle}>
+        Каталог товаров
+      </Text>
+
+      {products.map((product) => (
+        <View key={product.id} style={styles.card}>
+          <View style={styles.productInfo}>
+            <Text style={styles.productName}>
+              {product.name}
+            </Text>
+            <Text style={styles.price}>
+              {product.price} ₽
+            </Text>
+          </View>
+
+          <Pressable
+            onPress={() => deleteProduct(product.id)}
+          >
+            <Text style={styles.deleteText}>
+              Удалить
+            </Text>
+          </Pressable>
+        </View>
+      ))}
+
+      {products.length === 0 && (
+        <Text style={styles.emptyText}>
+          Пока нет товаров
+        </Text>
+      )}
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    justifyContent: 'center',
-    flexDirection: 'row',
+    backgroundColor: '#F4F6FA',
   },
-  safeArea: {
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    alignItems: 'center',
-    gap: Spacing.three,
-    paddingBottom: BottomTabInset + Spacing.three,
-    maxWidth: MaxContentWidth,
-  },
-  heroSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    gap: Spacing.four,
+  content: {
+    padding: 20,
+    paddingTop: 35,
+    paddingBottom: 50,
   },
   title: {
+    fontSize: 32,
+    fontWeight: 'bold',
+    color: '#1D3557',
+  },
+  subtitle: {
+    fontSize: 15,
+    color: '#68788A',
+    marginTop: 5,
+    marginBottom: 25,
+  },
+  summary: {
+    backgroundColor: '#FFFFFF',
+    padding: 20,
+    borderRadius: 16,
+    marginBottom: 20,
+  },
+  summaryLabel: {
+    fontSize: 15,
+    color: '#68788A',
+  },
+  summaryNumber: {
+    fontSize: 36,
+    fontWeight: 'bold',
+    color: '#2563EB',
+    marginTop: 8,
+  },
+  addButton: {
+    backgroundColor: '#2563EB',
+    padding: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginBottom: 28,
+  },
+  addButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  sectionTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#1D3557',
+    marginBottom: 14,
+  },
+  card: {
+    backgroundColor: '#FFFFFF',
+    padding: 18,
+    borderRadius: 12,
+    marginBottom: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  productInfo: {
+    flex: 1,
+    marginRight: 12,
+  },
+  productName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1D3557',
+  },
+  price: {
+    fontSize: 15,
+    color: '#2563EB',
+    marginTop: 6,
+  },
+  deleteText: {
+    color: '#DC2626',
+    fontSize: 14,
+  },
+  emptyText: {
     textAlign: 'center',
-  },
-  code: {
-    textTransform: 'uppercase',
-  },
-  stepContainer: {
-    gap: Spacing.three,
-    alignSelf: 'stretch',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.four,
-    borderRadius: Spacing.four,
+    color: '#68788A',
+    marginTop: 25,
   },
 });
