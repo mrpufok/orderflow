@@ -5,8 +5,10 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
+
 
 // Описываем структуру товара
 type Product = {
@@ -26,19 +28,47 @@ export default function HomeScreen() {
   const [products, setProducts] =
     useState<Product[]>(initialProducts);
 
+  const [productName, setProductName] = useState('');
+  const [productPrice, setProductPrice] = useState('');
+  const [formError, setFormError] = useState('');
+
   // Добавление товара
+  
   function addProduct() {
+    const name = productName.trim();
+    const priceText = productPrice.trim().replace(',', '.');
+    const price = Number(priceText);
+
+    if (!name) {
+      setFormError('Введите название товара');
+      return;
+    }
+
+    if (
+      !/^\d+(\.\d{1,2})?$/.test(priceText) ||
+      !Number.isFinite(price) ||
+      price <= 0
+    ) {
+      setFormError('Введите корректную цену больше нуля');
+      return;
+    }
+
     const nextId =
       Math.max(0, ...products.map((p) => p.id)) + 1;
 
     const newProduct: Product = {
       id: nextId,
-      name: `Новый товар ${nextId}`,
-      price: 990,
+      name: name,
+      price: price,
     };
 
     setProducts([...products, newProduct]);
+
+    setProductName('');
+    setProductPrice('');
+    setFormError('');
   }
+
 
   // Удаление товара
   function deleteProduct(id: number) {
@@ -64,6 +94,33 @@ export default function HomeScreen() {
         <Text style={styles.summaryNumber}>
           {products.length}
         </Text>
+      </View>
+
+      <View style={styles.form}>
+        <Text style={styles.formTitle}>
+          Новый товар
+        </Text>
+
+        <TextInput
+          style={styles.input}
+          placeholder="Название товара"
+          value={productName}
+          onChangeText={setProductName}
+        />
+
+        <TextInput
+          style={styles.input}
+          placeholder="Цена в рублях"
+          keyboardType="decimal-pad"
+          value={productPrice}
+          onChangeText={setProductPrice}
+        />
+
+        {formError !== '' && (
+          <Text style={styles.error}>
+            {formError}
+          </Text>
+        )}
       </View>
 
       <Pressable
@@ -110,6 +167,30 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  form: {
+    backgroundColor: '#FFFFFF',
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 12,
+  },
+  formTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#1D3557',
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#D8E0EB',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 10,
+    fontSize: 16,
+    color: '#1D3557',
+  },
+  error: {
+    color: '#DC2626',
+    marginTop: 10,
+  },
   container: {
     flex: 1,
     backgroundColor: '#F4F6FA',
