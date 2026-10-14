@@ -1,56 +1,249 @@
-# Welcome to your Expo app 👋
+# OrderFlow — система учёта заказов
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+**Учебный проект по дисциплине «Разработка кроссплатформенных мобильных приложений»**  
+**Вариант № 15:** «Информационная подсистема учёта заказов»  
+**Выполнил:** Чурин Роман Владимирович, группа ИСТZ-3401, 4 курс
 
-## Get started
+## 1. Назначение проекта
 
-1. Install dependencies
+OrderFlow — учебное клиент-серверное мобильное приложение для учёта товаров и заказов небольшого магазина. Программа позволяет вести каталог, учитывать остатки на складе, оформлять заказы с несколькими товарными позициями, рассчитывать стоимость с учётом скидки и просматривать историю продаж.
 
-   ```bash
-   npm install
-   ```
+Проект демонстрирует разработку мобильного клиента, REST API и реляционной базы данных, а также обмен данными между ними. Исходный код размещён в репозитории: <https://github.com/mrpufok/orderflow>.
 
-2. Start the app
+## 2. Реализованные возможности
 
-   ```bash
-   npx expo start
-   ```
+**Товары и категории**
 
-In the output, you'll find options to open the app in a
+- Просмотр списка товаров, их цен, категорий и складских остатков.
+- Добавление, редактирование и удаление товаров.
+- Поиск товаров по названию и фильтрация по категории.
+- Добавление новых категорий товаров.
+- Проверка корректности вводимых значений: цены, количества, обязательных полей.
+- Защита от удаления товара, уже связанного с оформленным заказом, на уровне базы данных.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+**Оформление заказов**
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+- Добавление нескольких товаров в заказ и изменение их количества.
+- Указание клиента, сотрудника и адреса доставки (либо самовывоза).
+- Применение процентной скидки и расчёт итоговой суммы.
+- Проверка наличия товара перед оформлением.
+- Автоматическое уменьшение складских остатков после оформления заказа.
+- Просмотр истории заказов, состава, суммы и дат.
+- Изменение статуса заказа с «Новый» на «Отгружен».
 
-## Get a fresh project
+Данные товаров, категорий и заказов сохраняются в PostgreSQL и доступны после перезапуска мобильного приложения. Текущая версия использует единый прокручиваемый экран: разделение на отдельные экраны в рамках проекта ещё не выполнено.
 
-When you're ready, run:
+## 3. Используемые технологии
 
-```bash
-npm run reset-project
+| Компонент | Технология | Назначение |
+|---|---|---|
+| Мобильный клиент | React Native, Expo SDK 57, TypeScript | Интерфейс Android-приложения и HTTP-запросы |
+| Маршрутизация | Expo Router | Структура экранов мобильного проекта |
+| Сервер | Node.js, Express 5 | REST API и обработка запросов |
+| База данных | PostgreSQL | Постоянное хранение связанных данных |
+| Работа с PostgreSQL | `pg` (node-postgres) | SQL-запросы и транзакции |
+| Управление версиями | Git, GitHub | Хранение исходного кода и истории изменений |
+
+React Native и Expo позволяют использовать общую кодовую базу для разных платформ. Практическая проверка в рамках разработки проводилась на Android с помощью Expo Go; отдельная проверка сборки на iOS пока не выполнялась.
+
+## 4. Архитектура приложения
+
+```text
+Android-приложение (React Native + Expo)
+                  |
+                  | HTTP / JSON
+                  v
+        REST API (Node.js + Express)
+                  |
+                  | SQL-запросы
+                  v
+           PostgreSQL (orderflow_db)
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Мобильное приложение отправляет запросы на сервер. Сервер проверяет данные, выполняет необходимые SQL-операции и возвращает ответ в формате JSON. В мобильном клиенте не хранятся учётные данные PostgreSQL: соединение с базой выполняет только сервер.
 
-### Other setup steps
+При оформлении заказа сервер использует транзакцию PostgreSQL. Создание заказа, запись его позиций и списание остатков выполняются совместно; при ошибке изменения отменяются. Для защиты от одновременного списания одного и того же товара применяется блокировка строк `FOR UPDATE`. Денежные суммы в базе хранятся в целых копейках.
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+## 5. Структура репозитория
 
-## Learn more
+```text
+orderflow/
+├── src/
+│   └── app/
+│       └── index.tsx        # Основной экран мобильного клиента
+├── assets/                 # Ресурсы мобильного приложения
+├── server/
+│   ├── db/
+│   │   ├── schema.sql       # Создание схемы PostgreSQL
+│   │   └── seed.sql         # Начальные категории и товары
+│   ├── src/
+│   │   └── index.js         # REST API
+│   ├── .env.example         # Пример конфигурации сервера
+│   └── package.json        # Зависимости и команды сервера
+├── app.json                # Конфигурация Expo
+├── package.json            # Зависимости мобильного клиента
+└── README.md               # Описание проекта и инструкция по запуску
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+## 6. Структура базы данных
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+В базе `orderflow_db` используются четыре взаимосвязанные таблицы:
 
-## Join the community
+| Таблица | Содержимое |
+|---|---|
+| `categories` | Идентификатор, название и описание категории |
+| `products` | Товар, категория, название, цена в копейках, остаток |
+| `orders` | Клиент, сотрудник, даты, адрес, статус и общая сумма заказа |
+| `order_details` | Позиции заказа: товар, количество, сохранённая цена, скидка и сумма позиции |
 
-Join our community of developers creating universal apps.
+Связи: `products.category_id → categories.id`; `order_details.order_id → orders.id`; `order_details.product_id → products.id`. Первичный ключ таблицы `order_details` составной: `(order_id, product_id)`.
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+## 7. Запуск проекта на Windows
+
+### 7.1. Необходимое ПО
+
+- Node.js 22 или новее и npm.
+- PostgreSQL и, для удобства, pgAdmin 4.
+- Git.
+- Android-смартфон с Expo Go, подключённый к той же локальной сети, что и компьютер.
+
+### 7.2. Получение исходного кода
+
+```powershell
+git clone https://github.com/mrpufok/orderflow.git
+cd orderflow
+npm install
+```
+
+### 7.3. Подготовка PostgreSQL
+
+1. Запустить PostgreSQL и открыть pgAdmin 4.
+2. Создать базу данных **`orderflow_db`** (например, под пользователем `postgres`).
+3. Выбрать созданную базу и открыть **Query Tool**.
+4. Выполнить `server/db/schema.sql` для создания таблиц.
+5. Выполнить `server/db/seed.sql` для добавления демонстрационных категорий и товаров.
+
+При первом заполнении создаются три категории («Периферия», «Мониторы», «Прочее») и три товара («Клавиатура», «Компьютерная мышь», «Монитор»). Если данные уже изменялись, текущее содержимое базы может отличаться.
+
+### 7.4. Запуск сервера
+
+В отдельном терминале PowerShell:
+
+```powershell
+cd server
+npm install
+Copy-Item .env.example .env
+notepad .env
+```
+
+В файле `server/.env` указываются параметры базы:
+
+```dotenv
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_NAME=orderflow_db
+DB_USER=postgres
+DB_PASSWORD=ВАШ_ПАРОЛЬ_POSTGRESQL
+HOST=0.0.0.0
+PORT=3000
+```
+
+После сохранения настроек:
+
+```powershell
+npm run dev
+```
+
+Проверить сервер на компьютере:
+
+- <http://127.0.0.1:3000/api/health> — проверка подключения к PostgreSQL;
+- <http://127.0.0.1:3000/api/products> — список товаров в JSON.
+
+При доступе с телефона сервер слушает локальный сетевой интерфейс (`HOST=0.0.0.0`). Это учебная конфигурация для доверенной частной сети, а не для публикации API в интернет.
+
+### 7.5. Подключение мобильного клиента
+
+1. В PowerShell выполнить `ipconfig` и определить IPv4-адрес компьютера в используемой сети.
+2. В корне `orderflow` создать файл `.env.local` со строкой:
+
+   ```dotenv
+   EXPO_PUBLIC_API_URL=http://192.168.1.100:3000
+   ```
+
+   Вместо `192.168.1.100` указать реальный IPv4-адрес компьютера. Окончание `/api` здесь не требуется.
+3. Убедиться, что компьютер и Android находятся в одной локальной сети.
+4. Во втором терминале, **из корня проекта**, выполнить:
+
+   ```powershell
+   npx expo start --clear
+   ```
+
+5. Открыть приложение через QR-код с помощью Expo Go.
+
+Сначала рекомендуется открыть на телефоне `http://IP_КОМПЬЮТЕРА:3000/api/health`. При недоступности проверить IP-адрес, Wi-Fi, работу сервера и разрешения брандмауэра Windows для частной сети.
+
+**Не публиковать** `server/.env`, `.env.local`, пароль PostgreSQL и другие секреты. Пароль БД должен оставаться только в локальном серверном файле `.env`.
+
+## 8. Основные методы REST API
+
+| Метод | Маршрут | Действие |
+|---|---|---|
+| GET | `/api/health` | Проверить соединение с базой |
+| GET | `/api/categories` | Получить категории |
+| POST | `/api/categories` | Добавить категорию |
+| GET | `/api/products` | Получить товары; доступны параметры `search`, `categoryId` |
+| POST | `/api/products` | Добавить товар |
+| PUT | `/api/products/:id` | Изменить товар |
+| DELETE | `/api/products/:id` | Удалить товар при отсутствии связанных заказов |
+| GET | `/api/orders` | Получить историю заказов с позициями |
+| POST | `/api/orders` | Оформить заказ и списать остатки |
+| PATCH | `/api/orders/:id/ship` | Отметить заказ как отгруженный |
+
+## 9. Проверка работоспособности
+
+Предлагаемый сценарий демонстрации для преподавателя:
+
+1. Запустить PostgreSQL, Node.js API и мобильное приложение на Android.
+2. Убедиться, что приложение получает товары и категории из базы данных.
+3. Создать категорию и добавить товар с ценой и остатком.
+4. Изменить параметры товара, найти его по названию и отфильтровать каталог.
+5. Добавить товары в заказ, указать клиента, сотрудника, количество и скидку.
+6. Оформить заказ и убедиться в уменьшении остатков.
+7. Открыть историю заказов и изменить статус на «Отгружен».
+8. Перезапустить мобильное приложение и убедиться, что записи сохранились.
+9. Проверить ограничение: нельзя оформить заказ с количеством выше текущего остатка.
+
+Для проверки записи в PostgreSQL можно выполнить:
+
+```sql
+SELECT id, name, price_cents / 100.0 AS price_rub, stock
+FROM products
+ORDER BY id;
+
+SELECT id, customer, status, total_cents / 100.0 AS total_rub
+FROM orders
+ORDER BY id DESC;
+```
+
+Для статической проверки исходного кода доступны команды:
+
+```powershell
+# Из корня мобильного проекта
+npx tsc --noEmit
+
+# Из папки server
+npm run check
+```
+
+Эти команды проверяют TypeScript и синтаксис серверного JavaScript; они **не заменяют функциональное тестирование**. Автоматизированные функциональные тесты в текущем репозитории не представлены. Результаты итогового тестирования следует оформить отдельно.
+
+## 10. Ограничения учебной версии
+
+- Сервер рассчитан на запуск в доверенной локальной сети и пока не реализует регистрацию и авторизацию пользователей.
+- В текущей версии функции собраны на одном основном экране; отдельная многовкладочная навигация ещё не реализована.
+- В процессе разработки приложение проверялось на Android с Expo Go. Нативные сборки и отдельное тестирование iOS не подтверждены.
+- Для работы приложения необходимы запущенные PostgreSQL и Node.js API, а также сетевое соединение между телефоном и компьютером.
+
+## 11. Результат работы
+
+Разработан учебный прототип клиент-серверной мобильной информационной подсистемы учёта заказов. Реализованы взаимодействие мобильного клиента с REST API, хранение информации в PostgreSQL, основные операции с товарами и категориями, создание заказов и сохранение истории продаж. Дальнейшие задачи — завершить формализованное тестирование и итоговое оформление проекта для демонстрации.
