@@ -23,6 +23,48 @@ type Product = {
   stock: number;
 };
 
+// Состав заказа хранит цену на момент его создания.
+type OrderDetail = {
+  productId: number;
+  productName: string;
+  quantity: number;
+  unitPriceCents: number;
+  discountPercent: number;
+  lineTotalCents: number;
+};
+
+type Order = {
+  id: number;
+  customer: string;
+  employee: string;
+  orderDate: string;
+  shippedDate: string | null;
+  shipName: string;
+  shipAddress: string;
+  status: 'Новый' | 'Отгружен';
+  details: OrderDetail[];
+  totalCents: number;
+};
+
+type CartItem = {
+  productId: number;
+  quantity: number;
+};
+
+// Все суммы считаем в копейках, чтобы уменьшить ошибки округления.
+function toCents(price: number) {
+  return Math.round(price * 100);
+}
+
+function formatMoney(cents: number) {
+  return `${(cents / 100).toFixed(2)} ₽`;
+}
+
+function lineTotalCents(unitCents: number, quantity: number, discount: number) {
+  const discountHundredths = Math.round(discount * 100);
+  return Math.round(unitCents * quantity * (10000 - discountHundredths) / 10000);
+}
+
 const initialCategories: Category[] = [
   { id: 1, name: 'Периферия', description: 'Клавиатуры и мыши' },
   { id: 2, name: 'Мониторы', description: 'Экраны и дисплеи' },
@@ -55,6 +97,16 @@ export default function HomeScreen() {
   const [search, setSearch] = useState('');
   const [filterCategoryId, setFilterCategoryId] = useState<number | null>(null);
 
+  // Состояния оформления заказов
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [customer, setCustomer] = useState('');
+  const [employee, setEmployee] = useState('Оператор');
+  const [shipAddress, setShipAddress] = useState('');
+  const [discountText, setDiscountText] = useState('0');
+  const [orderError, setOrderError] = useState('');
+
+  const nextOrderId = useRef(1);
   const nextProductId = useRef(4);
   const nextCategoryId = useRef(4);
   const pageRef = useRef<ScrollView>(null);
@@ -69,6 +121,21 @@ export default function HomeScreen() {
       filterCategoryId === null || product.categoryId === filterCategoryId;
     return matchesName && matchesCategory;
   });
+
+  const discountInput = discountText.trim().replace(',', '.');
+  const isDiscountValid = /^\d+(\.\d{1,2})?$/.test(discountInput) &&
+    Number(discountInput) >= 0 && Number(discountInput) <= 100;
+  const discount = isDiscountValid ? Number(discountInput) : 0;
+  const cartLines = cart.flatMap((item) => {
+    const product = products.find((p) => p.id === item.productId);
+    return product ? [{ product, quantity: item.quantity }] : [];
+  });
+  const cartTotalCents = cartLines.reduce(
+    (sum, line) => sum + lineTotalCents(
+      toCents(line.product.price), line.quantity, discount
+    ),
+    0
+  );
 
   function categoryNameById(id: number) {
     return categories.find((category) => category.id === id)?.name ?? 'Без категории';
@@ -147,6 +214,7 @@ export default function HomeScreen() {
         style: 'destructive',
         onPress: () => {
           setProducts((current) => current.filter((item) => item.id !== product.id));
+          setCart((current) => current.filter((item) => item.productId !== product.id));
           if (editingId === product.id) clearProductForm();
         },
       },
@@ -176,6 +244,97 @@ export default function HomeScreen() {
     setCategoryDescription('');
     setCategoryError('');
     setShowCategoryForm(false);
+  }
+
+  // Изменяем количество товаров в заказе, не превышая остаток.
+  function changeCartQuantity(productId: number, delta: number) {
+    const product = products.find((p) => p.id === productId);
+    if (!product) return;
+
+    const currentQty = cart.find((item) => item.productId === productId)?.quantity ?? 0;
+    const newQty = currentQty + delta;
+    if (newQty > product.stock) {
+      Alert.alert('Недостаточно товара', `На складе только ${product.stock} шт.`);
+      return;
+    }
+    setCart((current) => {
+      if (newQty <= 0) return current.filter((item) => item.productId !== productId);
+      return current.some((item) => item.productId === productId)
+        ? current.map((item) => item.productId === productId
+            ? { ...item, quantity: newQty } : item)
+        : [...current, { productId, quantity: newQty }];
+    });
+    setOrderError('');
+  }
+
+  // Создаём заказ и уменьшаем складские остатки.
+  function createOrder() {
+    if (!customer.trim()) {
+      setOrderError('Введите имя или название клиента');
+      return;
+    }
+    if (!employee.trim()) {
+      setOrderError('Введите имя сотрудника');
+      return;
+    }
+    if (!isDiscountValid) {
+      setOrderError('Скидка должна быть от 0 до 100% (не более двух знаков после запятой)');
+      return;
+    }
+    if (cartLines.length === 0) {
+      setOrderError('Добавьте хотя бы один товар в заказ');
+      return;
+    }
+    for (const line of cartLines) {
+      if (line.quantity > line.product.stock) {
+        setOrderError(`Недостаточно товара «${line.product.name}» на складе`);
+        return;
+      }
+    }
+
+    const details: OrderDetail[] = cartLines.map(({ product, quantity }) => {
+      const unitPriceCents = toCents(product.price);
+      return {
+        productId: product.id,
+        productName: product.name,
+        quantity,
+        unitPriceCents,
+        discountPercent: discount,
+        lineTotalCents: lineTotalCents(unitPriceCents, quantity, discount),
+      };
+    });
+    const newOrder: Order = {
+      id: nextOrderId.current++,
+      customer: customer.trim(),
+      employee: employee.trim(),
+      orderDate: new Date().toISOString(),
+      shippedDate: null,
+      shipName: customer.trim(),
+      shipAddress: shipAddress.trim() || 'Самовывоз',
+      status: 'Новый',
+      details,
+      totalCents: details.reduce((sum, line) => sum + line.lineTotalCents, 0),
+    };
+
+    setProducts((current) => current.map((product) => {
+      const sold = details.find((line) => line.productId === product.id)?.quantity ?? 0;
+      return { ...product, stock: product.stock - sold };
+    }));
+    setOrders((current) => [newOrder, ...current]);
+    setCart([]);
+    setCustomer('');
+    setShipAddress('');
+    setDiscountText('0');
+    setOrderError('');
+    Alert.alert('Заказ оформлен', `Заказ №${newOrder.id} на сумму ${formatMoney(newOrder.totalCents)}`);
+  }
+
+  function shipOrder(id: number) {
+    setOrders((current) => current.map((order) =>
+      order.id === id && order.status === 'Новый'
+        ? { ...order, status: 'Отгружен' as const, shippedDate: new Date().toISOString() }
+        : order
+    ));
   }
 
   return (
@@ -353,6 +512,11 @@ export default function HomeScreen() {
             <Pressable onPress={() => editProduct(product)}>
               <Text style={styles.editText}>Редактировать</Text>
             </Pressable>
+            <Pressable onPress={() => changeCartQuantity(product.id, 1)} disabled={product.stock === 0}>
+              <Text style={product.stock > 0 ? styles.cartLink : styles.disabledText}>
+                {product.stock > 0 ? '+ В заказ' : 'Нет на складе'}
+              </Text>
+            </Pressable>
             <Pressable onPress={() => deleteProduct(product)}>
               <Text style={styles.deleteText}>Удалить</Text>
             </Pressable>
@@ -362,6 +526,107 @@ export default function HomeScreen() {
       {filteredProducts.length === 0 && (
         <Text style={styles.emptyText}>Товары не найдены</Text>
       )}
+
+      {/* Корзина и оформление нового заказа */}
+      <View style={styles.panel}>
+        <Text style={styles.sectionTitle}>Новый заказ</Text>
+        <Text style={styles.mutedText}>
+          Добавляй товары кнопкой «+ В заказ» в каталоге выше.
+        </Text>
+
+        {cartLines.length === 0 ? (
+          <Text style={styles.emptyText}>В заказе пока нет товаров</Text>
+        ) : cartLines.map(({ product, quantity }) => (
+          <View key={product.id} style={styles.cartRow}>
+            <View style={styles.cartInfo}>
+              <Text style={styles.productName}>{product.name}</Text>
+              <Text style={styles.mutedText}>
+                {formatMoney(toCents(product.price))} за шт. · Остаток: {product.stock}
+              </Text>
+            </View>
+            <View style={styles.counter}>
+              <Pressable style={styles.counterButton} onPress={() => changeCartQuantity(product.id, -1)}>
+                <Text style={styles.counterLabel}>−</Text>
+              </Pressable>
+              <Text style={styles.counterNumber}>{quantity}</Text>
+              <Pressable style={styles.counterButton} onPress={() => changeCartQuantity(product.id, 1)}>
+                <Text style={styles.counterLabel}>+</Text>
+              </Pressable>
+            </View>
+          </View>
+        ))}
+
+        <TextInput
+          style={styles.input}
+          placeholder="Клиент (обязательно)"
+          value={customer}
+          onChangeText={setCustomer}
+        />
+        <TextInput
+          style={styles.input}
+          placeholder="Сотрудник (обязательно)"
+          value={employee}
+          onChangeText={setEmployee}
+        />
+        <TextInput
+          style={styles.input}
+          placeholder="Адрес доставки (пусто = самовывоз)"
+          value={shipAddress}
+          onChangeText={setShipAddress}
+        />
+        <TextInput
+          style={styles.input}
+          placeholder="Общая скидка, %"
+          keyboardType="decimal-pad"
+          value={discountText}
+          onChangeText={setDiscountText}
+        />
+        <Text style={styles.totalLabel}>
+          Итого со скидкой: {isDiscountValid ? formatMoney(cartTotalCents) : 'Проверьте скидку'}
+        </Text>
+        {orderError !== '' && <Text style={styles.error}>{orderError}</Text>}
+        <Pressable style={styles.primaryButton} onPress={createOrder}>
+          <Text style={styles.primaryButtonText}>Оформить заказ</Text>
+        </Pressable>
+      </View>
+
+      {/* История заказов сохраняется в памяти до перезапуска */}
+      <Text style={styles.sectionTitle}>История заказов ({orders.length})</Text>
+      {orders.length === 0 && (
+        <Text style={styles.emptyText}>Оформленных заказов пока нет</Text>
+      )}
+      {orders.map((order) => (
+        <View key={order.id} style={styles.productCard}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.productName}>Заказ №{order.id}</Text>
+            <Text style={order.status === 'Новый' ? styles.pendingText : styles.shippedText}>
+              {order.status}
+            </Text>
+          </View>
+          <Text style={styles.mutedText}>Клиент: {order.customer}</Text>
+          <Text style={styles.mutedText}>Сотрудник: {order.employee}</Text>
+          <Text style={styles.mutedText}>Создан: {new Date(order.orderDate).toLocaleString('ru-RU')}</Text>
+          <Text style={styles.mutedText}>Получатель: {order.shipName}</Text>
+          <Text style={styles.mutedText}>Доставка: {order.shipAddress}</Text>
+          {order.details.map((line) => (
+            <Text key={line.productId} style={styles.orderLine}>
+              {line.productName} × {line.quantity} — {formatMoney(line.lineTotalCents)}
+              {line.discountPercent > 0 ? ` (−${line.discountPercent}%)` : ''}
+            </Text>
+          ))}
+          <Text style={styles.orderTotal}>Сумма заказа: {formatMoney(order.totalCents)}</Text>
+          {order.shippedDate && (
+            <Text style={styles.mutedText}>
+              Отгружен: {new Date(order.shippedDate).toLocaleString('ru-RU')}
+            </Text>
+          )}
+          {order.status === 'Новый' && (
+            <Pressable style={styles.secondaryButton} onPress={() => shipOrder(order.id)}>
+              <Text style={styles.actionLink}>Отметить как отгруженный</Text>
+            </Pressable>
+          )}
+        </View>
+      ))}
     </ScrollView>
   );
 }
@@ -404,4 +669,23 @@ const styles = StyleSheet.create({
   editText: { color: '#2563EB', fontSize: 14, fontWeight: '600' },
   deleteText: { color: '#DC2626', fontSize: 14 },
   emptyText: { color: '#68788A', textAlign: 'center', padding: 24 },
+  cartLink: { color: '#148056', fontSize: 14, fontWeight: '600' },
+  disabledText: { color: '#A0A7B2', fontSize: 14 },
+  cartRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    borderBottomColor: '#E8ECF2', borderBottomWidth: 1, paddingVertical: 12,
+  },
+  cartInfo: { flex: 1, paddingRight: 8 },
+  counter: { flexDirection: 'row', alignItems: 'center', gap: 9 },
+  counterButton: {
+    width: 32, height: 32, borderRadius: 8, backgroundColor: '#E9EFF8',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  counterLabel: { fontSize: 20, fontWeight: 'bold', color: '#1D3557' },
+  counterNumber: { fontSize: 16, minWidth: 18, textAlign: 'center', color: '#1D3557' },
+  totalLabel: { fontSize: 18, fontWeight: 'bold', color: '#1D3557', marginTop: 18 },
+  orderLine: { fontSize: 14, color: '#1D3557', marginTop: 8 },
+  orderTotal: { fontSize: 16, fontWeight: 'bold', color: '#2563EB', marginTop: 14 },
+  pendingText: { color: '#B36B00', fontWeight: '600' },
+  shippedText: { color: '#148056', fontWeight: '600' },
 });
