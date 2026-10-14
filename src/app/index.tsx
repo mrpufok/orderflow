@@ -9,19 +9,17 @@ import {
   View,
 } from 'react-native';
 
-
-// Описываем структуру товара
 type Product = {
   id: number;
   name: string;
   price: number;
+  stock: number;
 };
 
-// Первые тестовые товары
 const initialProducts: Product[] = [
-  { id: 1, name: 'Клавиатура', price: 1500 },
-  { id: 2, name: 'Компьютерная мышь', price: 900 },
-  { id: 3, name: 'Монитор', price: 12500 },
+  { id: 1, name: 'Клавиатура', price: 1500, stock: 12 },
+  { id: 2, name: 'Компьютерная мышь', price: 900, stock: 25 },
+  { id: 3, name: 'Монитор', price: 12500, stock: 5 },
 ];
 
 export default function HomeScreen() {
@@ -30,14 +28,17 @@ export default function HomeScreen() {
 
   const [productName, setProductName] = useState('');
   const [productPrice, setProductPrice] = useState('');
+  const [productStock, setProductStock] = useState('');
   const [formError, setFormError] = useState('');
 
   // Добавление товара
-  
   function addProduct() {
     const name = productName.trim();
     const priceText = productPrice.trim().replace(',', '.');
+    const stockText = productStock.trim();
+
     const price = Number(priceText);
+    const stock = Number(stockText);
 
     if (!name) {
       setFormError('Введите название товара');
@@ -53,22 +54,31 @@ export default function HomeScreen() {
       return;
     }
 
+    if (
+      !/^\d+$/.test(stockText) ||
+      !Number.isSafeInteger(stock)
+    ) {
+      setFormError('Введите целое количество от 0');
+      return;
+    }
+
     const nextId =
       Math.max(0, ...products.map((p) => p.id)) + 1;
 
     const newProduct: Product = {
       id: nextId,
-      name: name,
-      price: price,
+      name,
+      price,
+      stock,
     };
 
     setProducts([...products, newProduct]);
 
     setProductName('');
     setProductPrice('');
+    setProductStock('');
     setFormError('');
   }
-
 
   // Удаление товара
   function deleteProduct(id: number) {
@@ -81,12 +91,14 @@ export default function HomeScreen() {
     <ScrollView
       style={styles.container}
       contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
     >
       <Text style={styles.title}>OrderFlow</Text>
       <Text style={styles.subtitle}>
         Система учёта заказов
       </Text>
 
+      {/* Статистика */}
       <View style={styles.summary}>
         <Text style={styles.summaryLabel}>
           Товаров в каталоге
@@ -96,6 +108,7 @@ export default function HomeScreen() {
         </Text>
       </View>
 
+      {/* Форма добавления */}
       <View style={styles.form}>
         <Text style={styles.formTitle}>
           Новый товар
@@ -116,22 +129,31 @@ export default function HomeScreen() {
           onChangeText={setProductPrice}
         />
 
+        <TextInput
+          style={styles.input}
+          placeholder="Количество на складе"
+          keyboardType="number-pad"
+          value={productStock}
+          onChangeText={setProductStock}
+        />
+
         {formError !== '' && (
           <Text style={styles.error}>
             {formError}
           </Text>
         )}
+
+        <Pressable
+          style={styles.addButton}
+          onPress={addProduct}
+        >
+          <Text style={styles.addButtonText}>
+            + Добавить товар
+          </Text>
+        </Pressable>
       </View>
 
-      <Pressable
-        style={styles.addButton}
-        onPress={addProduct}
-      >
-        <Text style={styles.addButtonText}>
-          + Добавить товар
-        </Text>
-      </Pressable>
-
+      {/* Каталог товаров */}
       <Text style={styles.sectionTitle}>
         Каталог товаров
       </Text>
@@ -142,8 +164,15 @@ export default function HomeScreen() {
             <Text style={styles.productName}>
               {product.name}
             </Text>
+
+            <Text style={styles.stockText}>
+              {product.stock > 0
+                ? `На складе: ${product.stock} шт.`
+                : 'Нет в наличии'}
+            </Text>
+
             <Text style={styles.price}>
-              {product.price} ₽
+              {product.price.toFixed(2)} ₽
             </Text>
           </View>
 
@@ -167,30 +196,6 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  form: {
-    backgroundColor: '#FFFFFF',
-    padding: 16,
-    borderRadius: 12,
-    marginBottom: 12,
-  },
-  formTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#1D3557',
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: '#D8E0EB',
-    borderRadius: 8,
-    padding: 12,
-    marginTop: 10,
-    fontSize: 16,
-    color: '#1D3557',
-  },
-  error: {
-    color: '#DC2626',
-    marginTop: 10,
-  },
   container: {
     flex: 1,
     backgroundColor: '#F4F6FA',
@@ -227,12 +232,36 @@ const styles = StyleSheet.create({
     color: '#2563EB',
     marginTop: 8,
   },
+  form: {
+    backgroundColor: '#FFFFFF',
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 25,
+  },
+  formTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#1D3557',
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#D8E0EB',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 10,
+    fontSize: 16,
+    color: '#1D3557',
+  },
+  error: {
+    color: '#DC2626',
+    marginTop: 10,
+  },
   addButton: {
     backgroundColor: '#2563EB',
     padding: 16,
     borderRadius: 12,
     alignItems: 'center',
-    marginBottom: 28,
+    marginTop: 15,
   },
   addButtonText: {
     color: '#FFFFFF',
@@ -262,6 +291,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#1D3557',
+  },
+  stockText: {
+    fontSize: 14,
+    color: '#68788A',
+    marginTop: 5,
   },
   price: {
     fontSize: 15,
