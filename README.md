@@ -40,3 +40,22 @@ npx expo start
 Приложение открывается через QR-код в Expo Go. Проверить доступность API можно по адресу `http://IP_КОМПЬЮТЕРА:3000/api/health`.
 
 Файлы `.env` и `.env.local` содержат локальные настройки и не должны публиковаться в репозитории. Сервер рассчитан на учебную работу в доверенной локальной сети: авторизация пользователей в текущей версии не реализована.
+
+## Скриншоты приложения
+
+На скриншотах показано, как менялся интерфейс OrderFlow в процессе разработки, и работа текущей версии с PostgreSQL.
+
+**Подключение к PostgreSQL, каталог товаров и история заказов**
+
+<a href="screenshots/05-postgresql-orders.jpg">
+  <img src="screenshots/05-postgresql-orders.jpg" alt="Работа с PostgreSQL и история заказов" width="295">
+</a>
+
+**Этапы разработки интерфейса**
+
+<p>
+  <a href="screenshots/01-catalog.jpg"><img src="screenshots/01-catalog.jpg" alt="Первый вариант каталога" width="210"></a>
+  <a href="screenshots/02-product-form.jpg"><img src="screenshots/02-product-form.jpg" alt="Добавление товара" width="210"></a>
+  <a href="screenshots/03-stock.jpg"><img src="screenshots/03-stock.jpg" alt="Учёт складских остатков" width="210"></a>
+  <a href="screenshots/04-categories.jpg"><img src="screenshots/04-categories.jpg" alt="Выбор категории товара" width="210"></a>
+</p>
