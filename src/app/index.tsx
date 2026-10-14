@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Pressable,
@@ -65,27 +65,60 @@ function lineTotalCents(unitCents: number, quantity: number, discount: number) {
   return Math.round(unitCents * quantity * (10000 - discountHundredths) / 10000);
 }
 
-const initialCategories: Category[] = [
-  { id: 1, name: 'Периферия', description: 'Клавиатуры и мыши' },
-  { id: 2, name: 'Мониторы', description: 'Экраны и дисплеи' },
-  { id: 3, name: 'Прочее', description: 'Другие товары' },
-];
+// Адрес локального сервера задаётся в корневом .env.local мобильного проекта.
+// На Android нельзя использовать 127.0.0.1 для подключения к компьютеру.
+const API_URL = (process.env.EXPO_PUBLIC_API_URL || '').trim().replace(/\/$/, '');
 
-const initialProducts: Product[] = [
-  { id: 1, categoryId: 1, name: 'Клавиатура', price: 1500, stock: 12 },
-  { id: 2, categoryId: 1, name: 'Компьютерная мышь', price: 900, stock: 25 },
-  { id: 3, categoryId: 2, name: 'Монитор', price: 12500, stock: 5 },
-];
+// Универсальная функция запроса к нашему REST API.
+async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
+  if (!API_URL) {
+    throw new Error('Не задан EXPO_PUBLIC_API_URL в файле .env.local');
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      ...options,
+      headers: {
+        Accept: 'application/json',
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...options.headers,
+      },
+    });
+  } catch {
+    throw new Error('Нет связи с сервером. Проверь IP компьютера, Wi-Fi и порт 3000.');
+  }
+
+  const json: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    let message = `Ошибка сервера (HTTP ${response.status})`;
+    if (json && typeof json === 'object' && 'error' in json &&
+        typeof json.error === 'string') {
+      message = json.error;
+    }
+    throw new Error(message);
+  }
+  return json as T;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Произошла неизвестная ошибка';
+}
+
 
 export default function HomeScreen() {
-  const [products, setProducts] = useState<Product[]>(initialProducts);
-  const [categories, setCategories] = useState<Category[]>(initialCategories);
+  // Каталог и заказы теперь приходят из PostgreSQL через сервер.
+  const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [syncError, setSyncError] = useState('');
 
   // Состояния формы товара
   const [productName, setProductName] = useState('');
   const [productPrice, setProductPrice] = useState('');
   const [productStock, setProductStock] = useState('');
-  const [selectedCategoryId, setSelectedCategoryId] = useState(1);
+  const [selectedCategoryId, setSelectedCategoryId] = useState(0);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [formError, setFormError] = useState('');
 
@@ -106,10 +139,38 @@ export default function HomeScreen() {
   const [discountText, setDiscountText] = useState('0');
   const [orderError, setOrderError] = useState('');
 
-  const nextOrderId = useRef(1);
-  const nextProductId = useRef(4);
-  const nextCategoryId = useRef(4);
   const pageRef = useRef<ScrollView>(null);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [newCategories, newProducts, newOrders] = await Promise.all([
+        apiRequest<Category[]>('/api/categories'),
+        apiRequest<Product[]>('/api/products'),
+        apiRequest<Order[]>('/api/orders'),
+      ]);
+      setCategories(newCategories);
+      setProducts(newProducts);
+      setOrders(newOrders);
+      setSelectedCategoryId((current) =>
+        newCategories.some((category) => category.id === current)
+          ? current : (newCategories[0]?.id ?? 0)
+      );
+      // Удаляем из корзины товары, которых больше нет в каталоге.
+      setCart((current) => current.filter((item) =>
+        newProducts.some((product) => product.id === item.productId && product.stock > 0)
+      ));
+      setSyncError('');
+    } catch (error) {
+      setSyncError(errorMessage(error));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
 
   const totalStock = products.reduce((sum, product) => sum + product.stock, 0);
 
@@ -145,13 +206,14 @@ export default function HomeScreen() {
     setProductName('');
     setProductPrice('');
     setProductStock('');
-    setSelectedCategoryId(1);
+    setSelectedCategoryId(categories[0]?.id ?? 0);
     setEditingId(null);
     setFormError('');
   }
 
-  // Одна форма используется для создания и редактирования
-  function saveProduct() {
+  // Добавление и редактирование выполняются через REST API.
+  async function saveProduct() {
+    if (busy) return;
     const name = productName.trim();
     const priceText = productPrice.trim().replace(',', '.');
     const stockText = productStock.trim();
@@ -175,25 +237,22 @@ export default function HomeScreen() {
       return;
     }
 
-    if (editingId !== null) {
-      setProducts((current) =>
-        current.map((product) =>
-          product.id === editingId
-            ? { ...product, name, price, stock, categoryId: selectedCategoryId }
-            : product
-        )
-      );
-    } else {
-      const newProduct: Product = {
-        id: nextProductId.current++,
-        name,
-        price,
-        stock,
-        categoryId: selectedCategoryId,
-      };
-      setProducts((current) => [...current, newProduct]);
+    setBusy(true);
+    setFormError('');
+    try {
+      const body = JSON.stringify({ name, price, stock, categoryId: selectedCategoryId });
+      if (editingId !== null) {
+        await apiRequest<Product>(`/api/products/${editingId}`, { method: 'PUT', body });
+      } else {
+        await apiRequest<Product>('/api/products', { method: 'POST', body });
+      }
+      clearProductForm();
+      await loadData();
+    } catch (error) {
+      setFormError(errorMessage(error));
+    } finally {
+      setBusy(false);
     }
-    clearProductForm();
   }
 
   function editProduct(product: Product) {
@@ -207,22 +266,32 @@ export default function HomeScreen() {
   }
 
   function deleteProduct(product: Product) {
+    if (busy) return;
     Alert.alert('Удаление товара', `Удалить «${product.name}»?`, [
       { text: 'Отмена', style: 'cancel' },
       {
         text: 'Удалить',
         style: 'destructive',
-        onPress: () => {
-          setProducts((current) => current.filter((item) => item.id !== product.id));
-          setCart((current) => current.filter((item) => item.productId !== product.id));
-          if (editingId === product.id) clearProductForm();
+        onPress: async () => {
+          setBusy(true);
+          try {
+            await apiRequest<{ message: string }>(`/api/products/${product.id}`, { method: 'DELETE' });
+            setCart((current) => current.filter((item) => item.productId !== product.id));
+            if (editingId === product.id) clearProductForm();
+            await loadData();
+          } catch (error) {
+            Alert.alert('Удаление не выполнено', errorMessage(error));
+          } finally {
+            setBusy(false);
+          }
         },
       },
     ]);
   }
 
-  // Добавление категории без отдельного экрана
-  function addCategory() {
+  // Новые категории сохраняются на сервере.
+  async function addCategory() {
+    if (busy) return;
     const name = categoryName.trim();
     if (!name) {
       setCategoryError('Введите название категории');
@@ -233,17 +302,23 @@ export default function HomeScreen() {
       return;
     }
 
-    const newCategory: Category = {
-      id: nextCategoryId.current++,
-      name,
-      description: categoryDescription.trim(),
-    };
-    setCategories((current) => [...current, newCategory]);
-    setSelectedCategoryId(newCategory.id);
-    setCategoryName('');
-    setCategoryDescription('');
+    setBusy(true);
     setCategoryError('');
-    setShowCategoryForm(false);
+    try {
+      const category = await apiRequest<Category>('/api/categories', {
+        method: 'POST',
+        body: JSON.stringify({ name, description: categoryDescription.trim() }),
+      });
+      setCategoryName('');
+      setCategoryDescription('');
+      setShowCategoryForm(false);
+      setSelectedCategoryId(category.id);
+      await loadData();
+    } catch (error) {
+      setCategoryError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
   }
 
   // Изменяем количество товаров в заказе, не превышая остаток.
@@ -267,8 +342,9 @@ export default function HomeScreen() {
     setOrderError('');
   }
 
-  // Создаём заказ и уменьшаем складские остатки.
-  function createOrder() {
+  // Сервер создаёт заказ и списывает остатки в одной транзакции PostgreSQL.
+  async function createOrder() {
+    if (busy) return;
     if (!customer.trim()) {
       setOrderError('Введите имя или название клиента');
       return;
@@ -292,49 +368,44 @@ export default function HomeScreen() {
       }
     }
 
-    const details: OrderDetail[] = cartLines.map(({ product, quantity }) => {
-      const unitPriceCents = toCents(product.price);
-      return {
-        productId: product.id,
-        productName: product.name,
-        quantity,
-        unitPriceCents,
-        discountPercent: discount,
-        lineTotalCents: lineTotalCents(unitPriceCents, quantity, discount),
-      };
-    });
-    const newOrder: Order = {
-      id: nextOrderId.current++,
-      customer: customer.trim(),
-      employee: employee.trim(),
-      orderDate: new Date().toISOString(),
-      shippedDate: null,
-      shipName: customer.trim(),
-      shipAddress: shipAddress.trim() || 'Самовывоз',
-      status: 'Новый',
-      details,
-      totalCents: details.reduce((sum, line) => sum + line.lineTotalCents, 0),
-    };
-
-    setProducts((current) => current.map((product) => {
-      const sold = details.find((line) => line.productId === product.id)?.quantity ?? 0;
-      return { ...product, stock: product.stock - sold };
-    }));
-    setOrders((current) => [newOrder, ...current]);
-    setCart([]);
-    setCustomer('');
-    setShipAddress('');
-    setDiscountText('0');
+    setBusy(true);
     setOrderError('');
-    Alert.alert('Заказ оформлен', `Заказ №${newOrder.id} на сумму ${formatMoney(newOrder.totalCents)}`);
+    try {
+      const created = await apiRequest<{ id: number; totalCents: number }>('/api/orders', {
+        method: 'POST',
+        body: JSON.stringify({
+          customer: customer.trim(),
+          employee: employee.trim(),
+          shipAddress: shipAddress.trim() || 'Самовывоз',
+          discountPercent: discount,
+          items: cartLines.map(({ product, quantity }) => ({ productId: product.id, quantity })),
+        }),
+      });
+      // Очищаем форму только после подтверждения от сервера.
+      setCart([]);
+      setCustomer('');
+      setShipAddress('');
+      setDiscountText('0');
+      Alert.alert('Заказ оформлен', `Заказ №${created.id} на сумму ${formatMoney(created.totalCents)}`);
+      await loadData();
+    } catch (error) {
+      setOrderError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
   }
 
-  function shipOrder(id: number) {
-    setOrders((current) => current.map((order) =>
-      order.id === id && order.status === 'Новый'
-        ? { ...order, status: 'Отгружен' as const, shippedDate: new Date().toISOString() }
-        : order
-    ));
+  async function shipOrder(id: number) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await apiRequest(`/api/orders/${id}/ship`, { method: 'PATCH' });
+      await loadData();
+    } catch (error) {
+      Alert.alert('Ошибка отгрузки', errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -346,6 +417,23 @@ export default function HomeScreen() {
     >
       <Text style={styles.title}>OrderFlow</Text>
       <Text style={styles.subtitle}>Система учёта заказов</Text>
+
+      {/* Состояние соединения с сервером и ручное обновление */}
+      <View style={styles.connectionPanel}>
+        <Text style={syncError ? styles.error : styles.mutedText}>
+          {syncError ? `Нет связи с API: ${syncError}`
+            : loading ? 'Загружаем данные с сервера...'
+            : 'Данные загружены из PostgreSQL'}
+        </Text>
+        <Pressable
+          style={styles.reloadButton}
+          onPress={() => void loadData()}
+          disabled={busy || loading}
+        >
+          <Text style={styles.actionLink}>Обновить данные</Text>
+        </Pressable>
+        {busy && <Text style={styles.mutedText}>Сохраняем изменения...</Text>}
+      </View>
 
       <View style={styles.statsRow}>
         <View style={styles.statCard}>
@@ -410,7 +498,7 @@ export default function HomeScreen() {
         </ScrollView>
 
         {formError !== '' && <Text style={styles.error}>{formError}</Text>}
-        <Pressable style={styles.primaryButton} onPress={saveProduct}>
+        <Pressable style={styles.primaryButton} onPress={saveProduct} disabled={busy || loading}>
           <Text style={styles.primaryButtonText}>
             {editingId === null ? '+ Добавить товар' : 'Сохранить изменения'}
           </Text>
@@ -450,7 +538,7 @@ export default function HomeScreen() {
               onChangeText={setCategoryDescription}
             />
             {categoryError !== '' && <Text style={styles.error}>{categoryError}</Text>}
-            <Pressable style={styles.primaryButton} onPress={addCategory}>
+            <Pressable style={styles.primaryButton} onPress={addCategory} disabled={busy || loading}>
               <Text style={styles.primaryButtonText}>Сохранить категорию</Text>
             </Pressable>
           </View>
@@ -509,15 +597,15 @@ export default function HomeScreen() {
           </Text>
           <Text style={styles.price}>{product.price.toFixed(2)} ₽</Text>
           <View style={styles.actionsRow}>
-            <Pressable onPress={() => editProduct(product)}>
+            <Pressable onPress={() => editProduct(product)} disabled={busy || loading}>
               <Text style={styles.editText}>Редактировать</Text>
             </Pressable>
-            <Pressable onPress={() => changeCartQuantity(product.id, 1)} disabled={product.stock === 0}>
+            <Pressable onPress={() => changeCartQuantity(product.id, 1)} disabled={busy || loading || product.stock === 0}>
               <Text style={product.stock > 0 ? styles.cartLink : styles.disabledText}>
                 {product.stock > 0 ? '+ В заказ' : 'Нет на складе'}
               </Text>
             </Pressable>
-            <Pressable onPress={() => deleteProduct(product)}>
+            <Pressable onPress={() => deleteProduct(product)} disabled={busy || loading}>
               <Text style={styles.deleteText}>Удалить</Text>
             </Pressable>
           </View>
@@ -585,12 +673,12 @@ export default function HomeScreen() {
           Итого со скидкой: {isDiscountValid ? formatMoney(cartTotalCents) : 'Проверьте скидку'}
         </Text>
         {orderError !== '' && <Text style={styles.error}>{orderError}</Text>}
-        <Pressable style={styles.primaryButton} onPress={createOrder}>
+        <Pressable style={styles.primaryButton} onPress={createOrder} disabled={busy || loading}>
           <Text style={styles.primaryButtonText}>Оформить заказ</Text>
         </Pressable>
       </View>
 
-      {/* История заказов сохраняется в памяти до перезапуска */}
+      {/* История заказов загружается из PostgreSQL */}
       <Text style={styles.sectionTitle}>История заказов ({orders.length})</Text>
       {orders.length === 0 && (
         <Text style={styles.emptyText}>Оформленных заказов пока нет</Text>
@@ -621,7 +709,7 @@ export default function HomeScreen() {
             </Text>
           )}
           {order.status === 'Новый' && (
-            <Pressable style={styles.secondaryButton} onPress={() => shipOrder(order.id)}>
+            <Pressable style={styles.secondaryButton} onPress={() => void shipOrder(order.id)} disabled={busy || loading}>
               <Text style={styles.actionLink}>Отметить как отгруженный</Text>
             </Pressable>
           )}
@@ -636,6 +724,8 @@ const styles = StyleSheet.create({
   content: { padding: 20, paddingTop: 35, paddingBottom: 60 },
   title: { fontSize: 32, fontWeight: 'bold', color: '#1D3557' },
   subtitle: { fontSize: 15, color: '#68788A', marginTop: 5, marginBottom: 22 },
+  connectionPanel: { backgroundColor: '#FFFFFF', padding: 14, borderRadius: 12, marginBottom: 16 },
+  reloadButton: { marginTop: 10, alignSelf: 'flex-start' },
   statsRow: { flexDirection: 'row', gap: 12, marginBottom: 20 },
   statCard: { flex: 1, backgroundColor: '#FFFFFF', padding: 16, borderRadius: 14 },
   statLabel: { fontSize: 13, color: '#68788A' },
