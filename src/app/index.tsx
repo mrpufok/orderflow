@@ -21,6 +21,7 @@ type Product = {
   name: string;
   price: number;
   stock: number;
+  unitsInOrder: number;
 };
 
 // Состав заказа хранит цену на момент его создания.
@@ -126,6 +127,7 @@ export default function HomeScreen() {
   const [showCategoryForm, setShowCategoryForm] = useState(false);
   const [categoryName, setCategoryName] = useState('');
   const [categoryDescription, setCategoryDescription] = useState('');
+  const [editingCategoryId, setEditingCategoryId] = useState<number | null>(null);
   const [categoryError, setCategoryError] = useState('');
   const [search, setSearch] = useState('');
   const [filterCategoryId, setFilterCategoryId] = useState<number | null>(null);
@@ -135,7 +137,10 @@ export default function HomeScreen() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [customer, setCustomer] = useState('');
   const [employee, setEmployee] = useState('Оператор');
+  const [shipName, setShipName] = useState('');
   const [shipAddress, setShipAddress] = useState('');
+  const [editingOrderId, setEditingOrderId] = useState<number | null>(null);
+  const orderFormY = useRef(0);
   const [discountText, setDiscountText] = useState('0');
   const [orderError, setOrderError] = useState('');
 
@@ -156,9 +161,10 @@ export default function HomeScreen() {
         newCategories.some((category) => category.id === current)
           ? current : (newCategories[0]?.id ?? 0)
       );
-      // Удаляем из корзины товары, которых больше нет в каталоге.
+      // Удаляем из корзины только товары, которых больше нет в каталоге.
+      // Во время редактирования заказа его позиции могут иметь нулевой свободный остаток.
       setCart((current) => current.filter((item) =>
-        newProducts.some((product) => product.id === item.productId && product.stock > 0)
+        newProducts.some((product) => product.id === item.productId)
       ));
       setSyncError('');
     } catch (error) {
@@ -289,15 +295,50 @@ export default function HomeScreen() {
     ]);
   }
 
-  // Новые категории сохраняются на сервере.
-  async function addCategory() {
+  function editCategory(category: Category) {
+    setEditingCategoryId(category.id);
+    setCategoryName(category.name);
+    setCategoryDescription(category.description);
+    setCategoryError('');
+    setShowCategoryForm(true);
+  }
+
+  function resetCategoryForm() {
+    setEditingCategoryId(null);
+    setCategoryName('');
+    setCategoryDescription('');
+    setCategoryError('');
+    setShowCategoryForm(false);
+  }
+
+  function deleteCategory(category: Category) {
+    if (busy) return;
+    Alert.alert('Удаление категории', `Удалить категорию «${category.name}»? Категории с товарами удалить нельзя.`, [
+      { text: 'Отмена', style: 'cancel' },
+      { text: 'Удалить', style: 'destructive', onPress: async () => {
+        setBusy(true);
+        try {
+          await apiRequest(`/api/categories/${category.id}`, { method: 'DELETE' });
+          if (editingCategoryId === category.id) resetCategoryForm();
+          await loadData();
+        } catch (error) {
+          Alert.alert('Не удалось удалить категорию', errorMessage(error));
+        } finally {
+          setBusy(false);
+        }
+      } },
+    ]);
+  }
+
+  // Создание и изменение категории выполняются через REST API.
+  async function saveCategory() {
     if (busy) return;
     const name = categoryName.trim();
     if (!name) {
       setCategoryError('Введите название категории');
       return;
     }
-    if (categories.some((category) => category.name.toLowerCase() === name.toLowerCase())) {
+    if (categories.some((category) => category.id !== editingCategoryId && category.name.toLowerCase() === name.toLowerCase())) {
       setCategoryError('Такая категория уже существует');
       return;
     }
@@ -305,13 +346,14 @@ export default function HomeScreen() {
     setBusy(true);
     setCategoryError('');
     try {
-      const category = await apiRequest<Category>('/api/categories', {
-        method: 'POST',
-        body: JSON.stringify({ name, description: categoryDescription.trim() }),
-      });
-      setCategoryName('');
-      setCategoryDescription('');
-      setShowCategoryForm(false);
+      const category = await apiRequest<Category>(
+        editingCategoryId === null ? '/api/categories' : `/api/categories/${editingCategoryId}`,
+        {
+          method: editingCategoryId === null ? 'POST' : 'PUT',
+          body: JSON.stringify({ name, description: categoryDescription.trim() }),
+        },
+      );
+      resetCategoryForm();
       setSelectedCategoryId(category.id);
       await loadData();
     } catch (error) {
@@ -321,15 +363,69 @@ export default function HomeScreen() {
     }
   }
 
-  // Изменяем количество товаров в заказе, не превышая остаток.
+  // При редактировании ранее списанное количество данного заказа снова доступно в форме.
+  function availableForOrder(product: Product): number {
+    if (editingOrderId === null) return product.stock;
+    const originalOrder = orders.find((order) => order.id === editingOrderId);
+    const previousQuantity = originalOrder?.details.find((line) => line.productId === product.id)?.quantity ?? 0;
+    return product.stock + previousQuantity;
+  }
+
+  function editOrder(order: Order) {
+    if (busy || order.status !== 'Новый') return;
+    setEditingOrderId(order.id);
+    setCart(order.details.map((line) => ({ productId: line.productId, quantity: line.quantity })));
+    setCustomer(order.customer);
+    setEmployee(order.employee);
+    setShipName(order.shipName);
+    setShipAddress(order.shipAddress);
+    setDiscountText(String(order.details[0]?.discountPercent ?? 0));
+    setOrderError('');
+    pageRef.current?.scrollTo({ y: orderFormY.current, animated: true });
+  }
+
+  function cancelOrderEdit() {
+    setEditingOrderId(null);
+    setCart([]);
+    setCustomer('');
+    setEmployee('Оператор');
+    setShipName('');
+    setShipAddress('');
+    setDiscountText('0');
+    setOrderError('');
+  }
+
+  function deleteOrder(order: Order) {
+    if (busy) return;
+    const note = order.status === 'Новый'
+      ? 'После удаления нового заказа его товары вернутся на склад.'
+      : 'Заказ уже отгружен, поэтому остатки на складе не изменятся.';
+    Alert.alert('Удаление заказа', `Удалить заказ №${order.id}? ${note}`, [
+      { text: 'Отмена', style: 'cancel' },
+      { text: 'Удалить', style: 'destructive', onPress: async () => {
+        setBusy(true);
+        try {
+          await apiRequest(`/api/orders/${order.id}`, { method: 'DELETE' });
+          if (editingOrderId === order.id) cancelOrderEdit();
+          await loadData();
+        } catch (error) {
+          Alert.alert('Не удалось удалить заказ', errorMessage(error));
+        } finally {
+          setBusy(false);
+        }
+      } },
+    ]);
+  }
+
+  // Изменяем количество товаров в заказе, не превышая доступный остаток.
   function changeCartQuantity(productId: number, delta: number) {
     const product = products.find((p) => p.id === productId);
     if (!product) return;
 
     const currentQty = cart.find((item) => item.productId === productId)?.quantity ?? 0;
     const newQty = currentQty + delta;
-    if (newQty > product.stock) {
-      Alert.alert('Недостаточно товара', `На складе только ${product.stock} шт.`);
+    if (newQty > availableForOrder(product)) {
+      Alert.alert('Недостаточно товара', `Доступно для этого заказа: ${availableForOrder(product)} шт.`);
       return;
     }
     setCart((current) => {
@@ -342,8 +438,8 @@ export default function HomeScreen() {
     setOrderError('');
   }
 
-  // Сервер создаёт заказ и списывает остатки в одной транзакции PostgreSQL.
-  async function createOrder() {
+  // Сервер создаёт/редактирует заказ и списывает остатки в транзакции PostgreSQL.
+  async function saveOrder() {
     if (busy) return;
     if (!customer.trim()) {
       setOrderError('Введите имя или название клиента');
@@ -351,6 +447,10 @@ export default function HomeScreen() {
     }
     if (!employee.trim()) {
       setOrderError('Введите имя сотрудника');
+      return;
+    }
+    if (!shipName.trim() || !shipAddress.trim()) {
+      setOrderError('Укажите название и адрес магазина');
       return;
     }
     if (!isDiscountValid) {
@@ -362,7 +462,7 @@ export default function HomeScreen() {
       return;
     }
     for (const line of cartLines) {
-      if (line.quantity > line.product.stock) {
+      if (line.quantity > availableForOrder(line.product)) {
         setOrderError(`Недостаточно товара «${line.product.name}» на складе`);
         return;
       }
@@ -371,22 +471,25 @@ export default function HomeScreen() {
     setBusy(true);
     setOrderError('');
     try {
-      const created = await apiRequest<{ id: number; totalCents: number }>('/api/orders', {
-        method: 'POST',
-        body: JSON.stringify({
-          customer: customer.trim(),
-          employee: employee.trim(),
-          shipAddress: shipAddress.trim() || 'Самовывоз',
-          discountPercent: discount,
-          items: cartLines.map(({ product, quantity }) => ({ productId: product.id, quantity })),
-        }),
-      });
+      const isEditing = editingOrderId !== null;
+      const saved = await apiRequest<{ id: number; totalCents: number }>(
+        isEditing ? `/api/orders/${editingOrderId}` : '/api/orders',
+        {
+          method: isEditing ? 'PUT' : 'POST',
+          body: JSON.stringify({
+            customer: customer.trim(),
+            employee: employee.trim(),
+            shipName: shipName.trim(),
+            shipAddress: shipAddress.trim(),
+            discountPercent: discount,
+            items: cartLines.map(({ product, quantity }) => ({ productId: product.id, quantity })),
+          }),
+        },
+      );
       // Очищаем форму только после подтверждения от сервера.
-      setCart([]);
-      setCustomer('');
-      setShipAddress('');
-      setDiscountText('0');
-      Alert.alert('Заказ оформлен', `Заказ №${created.id} на сумму ${formatMoney(created.totalCents)}`);
+      cancelOrderEdit();
+      Alert.alert(isEditing ? 'Заказ изменён' : 'Заказ оформлен',
+        `Заказ №${saved.id} на сумму ${formatMoney(saved.totalCents)}`);
       await loadData();
     } catch (error) {
       setOrderError(errorMessage(error));
@@ -514,15 +617,23 @@ export default function HomeScreen() {
       <View style={styles.panel}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Категории ({categories.length})</Text>
-          <Pressable onPress={() => setShowCategoryForm((visible) => !visible)}>
+          <Pressable onPress={() => showCategoryForm ? resetCategoryForm() : setShowCategoryForm(true)}>
             <Text style={styles.actionLink}>
-              {showCategoryForm ? 'Скрыть' : '+ Добавить'}
+              {showCategoryForm ? 'Отмена' : '+ Добавить'}
             </Text>
           </Pressable>
         </View>
-        <Text style={styles.mutedText}>
-          {categories.map((category) => category.name).join(' · ')}
-        </Text>
+        {categories.map((category) => (
+          <View key={category.id} style={styles.categoryRow}>
+            <Text style={styles.mutedText}>{category.name}</Text>
+            <Pressable onPress={() => editCategory(category)} disabled={busy || loading}>
+              <Text style={styles.actionLink}>Изменить</Text>
+            </Pressable>
+            <Pressable onPress={() => deleteCategory(category)} disabled={busy || loading}>
+              <Text style={styles.deleteText}>Удалить</Text>
+            </Pressable>
+          </View>
+        ))}
         {showCategoryForm && (
           <View>
             <TextInput
@@ -538,8 +649,10 @@ export default function HomeScreen() {
               onChangeText={setCategoryDescription}
             />
             {categoryError !== '' && <Text style={styles.error}>{categoryError}</Text>}
-            <Pressable style={styles.primaryButton} onPress={addCategory} disabled={busy || loading}>
-              <Text style={styles.primaryButtonText}>Сохранить категорию</Text>
+            <Pressable style={styles.primaryButton} onPress={saveCategory} disabled={busy || loading}>
+              <Text style={styles.primaryButtonText}>
+                {editingCategoryId === null ? 'Добавить категорию' : 'Сохранить изменения'}
+              </Text>
             </Pressable>
           </View>
         )}
@@ -594,15 +707,16 @@ export default function HomeScreen() {
           <Text style={styles.mutedText}>
             {categoryNameById(product.categoryId)} ·{' '}
             {product.stock > 0 ? `На складе: ${product.stock} шт.` : 'Нет в наличии'}
+            {' · '}В новых заказах: {product.unitsInOrder ?? 0} шт.
           </Text>
           <Text style={styles.price}>{product.price.toFixed(2)} ₽</Text>
           <View style={styles.actionsRow}>
             <Pressable onPress={() => editProduct(product)} disabled={busy || loading}>
               <Text style={styles.editText}>Редактировать</Text>
             </Pressable>
-            <Pressable onPress={() => changeCartQuantity(product.id, 1)} disabled={busy || loading || product.stock === 0}>
-              <Text style={product.stock > 0 ? styles.cartLink : styles.disabledText}>
-                {product.stock > 0 ? '+ В заказ' : 'Нет на складе'}
+            <Pressable onPress={() => changeCartQuantity(product.id, 1)} disabled={busy || loading || availableForOrder(product) === 0}>
+              <Text style={availableForOrder(product) > 0 ? styles.cartLink : styles.disabledText}>
+                {availableForOrder(product) > 0 ? '+ В заказ' : 'Нет на складе'}
               </Text>
             </Pressable>
             <Pressable onPress={() => deleteProduct(product)} disabled={busy || loading}>
@@ -616,8 +730,10 @@ export default function HomeScreen() {
       )}
 
       {/* Корзина и оформление нового заказа */}
-      <View style={styles.panel}>
-        <Text style={styles.sectionTitle}>Новый заказ</Text>
+      <View style={styles.panel} onLayout={(event) => { orderFormY.current = event.nativeEvent.layout.y; }}>
+        <Text style={styles.sectionTitle}>
+          {editingOrderId === null ? 'Новый заказ' : `Редактирование заказа №${editingOrderId}`}
+        </Text>
         <Text style={styles.mutedText}>
           Добавляй товары кнопкой «+ В заказ» в каталоге выше.
         </Text>
@@ -629,7 +745,7 @@ export default function HomeScreen() {
             <View style={styles.cartInfo}>
               <Text style={styles.productName}>{product.name}</Text>
               <Text style={styles.mutedText}>
-                {formatMoney(toCents(product.price))} за шт. · Остаток: {product.stock}
+                {formatMoney(toCents(product.price))} за шт. · Доступно: {availableForOrder(product)}
               </Text>
             </View>
             <View style={styles.counter}>
@@ -658,7 +774,13 @@ export default function HomeScreen() {
         />
         <TextInput
           style={styles.input}
-          placeholder="Адрес доставки (пусто = самовывоз)"
+          placeholder="Наименование магазина (обязательно)"
+          value={shipName}
+          onChangeText={setShipName}
+        />
+        <TextInput
+          style={styles.input}
+          placeholder="Адрес магазина (обязательно)"
           value={shipAddress}
           onChangeText={setShipAddress}
         />
@@ -673,9 +795,16 @@ export default function HomeScreen() {
           Итого со скидкой: {isDiscountValid ? formatMoney(cartTotalCents) : 'Проверьте скидку'}
         </Text>
         {orderError !== '' && <Text style={styles.error}>{orderError}</Text>}
-        <Pressable style={styles.primaryButton} onPress={createOrder} disabled={busy || loading}>
-          <Text style={styles.primaryButtonText}>Оформить заказ</Text>
+        <Pressable style={styles.primaryButton} onPress={saveOrder} disabled={busy || loading}>
+          <Text style={styles.primaryButtonText}>
+            {editingOrderId === null ? 'Оформить заказ' : 'Сохранить заказ'}
+          </Text>
         </Pressable>
+        {editingOrderId !== null && (
+          <Pressable style={styles.secondaryButton} onPress={cancelOrderEdit}>
+            <Text style={styles.secondaryButtonText}>Отменить редактирование заказа</Text>
+          </Pressable>
+        )}
       </View>
 
       {/* История заказов загружается из PostgreSQL */}
@@ -694,8 +823,8 @@ export default function HomeScreen() {
           <Text style={styles.mutedText}>Клиент: {order.customer}</Text>
           <Text style={styles.mutedText}>Сотрудник: {order.employee}</Text>
           <Text style={styles.mutedText}>Создан: {new Date(order.orderDate).toLocaleString('ru-RU')}</Text>
-          <Text style={styles.mutedText}>Получатель: {order.shipName}</Text>
-          <Text style={styles.mutedText}>Доставка: {order.shipAddress}</Text>
+          <Text style={styles.mutedText}>Магазин: {order.shipName}</Text>
+          <Text style={styles.mutedText}>Адрес магазина: {order.shipAddress}</Text>
           {order.details.map((line) => (
             <Text key={line.productId} style={styles.orderLine}>
               {line.productName} × {line.quantity} — {formatMoney(line.lineTotalCents)}
@@ -708,11 +837,21 @@ export default function HomeScreen() {
               Отгружен: {new Date(order.shippedDate).toLocaleString('ru-RU')}
             </Text>
           )}
-          {order.status === 'Новый' && (
-            <Pressable style={styles.secondaryButton} onPress={() => void shipOrder(order.id)} disabled={busy || loading}>
-              <Text style={styles.actionLink}>Отметить как отгруженный</Text>
+          <View style={styles.orderActions}>
+            {order.status === 'Новый' && (
+              <Pressable onPress={() => editOrder(order)} disabled={busy || loading}>
+                <Text style={styles.actionLink}>Изменить</Text>
+              </Pressable>
+            )}
+            {order.status === 'Новый' && (
+              <Pressable onPress={() => void shipOrder(order.id)} disabled={busy || loading}>
+                <Text style={styles.cartLink}>Отгрузить</Text>
+              </Pressable>
+            )}
+            <Pressable onPress={() => deleteOrder(order)} disabled={busy || loading}>
+              <Text style={styles.deleteText}>Удалить</Text>
             </Pressable>
-          )}
+          </View>
         </View>
       ))}
     </ScrollView>
@@ -732,6 +871,8 @@ const styles = StyleSheet.create({
   statValue: { fontSize: 28, fontWeight: 'bold', color: '#2563EB', marginTop: 8 },
   panel: { backgroundColor: '#FFFFFF', padding: 16, borderRadius: 14, marginBottom: 20 },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  categoryRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingVertical: 10 },
+  orderActions: { flexDirection: 'row', alignItems: 'center', gap: 24, marginTop: 16, flexWrap: 'wrap' },
   sectionTitle: { fontSize: 19, fontWeight: 'bold', color: '#1D3557', marginBottom: 10 },
   input: {
     borderWidth: 1, borderColor: '#D8E0EB', backgroundColor: '#FFFFFF',

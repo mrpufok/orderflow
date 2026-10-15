@@ -87,6 +87,8 @@ function productJson(row) {
     name: row.name,
     price: row.priceCents / 100,
     stock: row.stock,
+    // UnitsInOrder — количество единиц в заказах со статусом «Новый».
+    unitsInOrder: row.unitsInOrder ?? 0,
   };
 }
 
@@ -126,17 +128,44 @@ app.post('/api/categories', async (req, res) => {
   res.status(201).json(result.rows[0]);
 });
 
+// Изменение и удаление категорий. Категорию с товарами удалять нельзя.
+app.put('/api/categories/:id', async (req, res) => {
+  const id = parseRowId(req);
+  if (!isObject(req.body)) fail(400, 'Передай JSON-объект');
+  const name = requiredText(req.body.name, 'Название категории', 100);
+  const description = optionalText(req.body.description, 'Описание', 2000);
+  const result = await pool.query(
+    'UPDATE categories SET name = $1, description = $2 WHERE id = $3 RETURNING id, name, description',
+    [name, description, id]
+  );
+  if (result.rowCount === 0) fail(404, 'Категория не найдена');
+  res.json(result.rows[0]);
+});
+
+app.delete('/api/categories/:id', async (req, res) => {
+  const result = await pool.query('DELETE FROM categories WHERE id = $1 RETURNING id', [parseRowId(req)]);
+  if (result.rowCount === 0) fail(404, 'Категория не найдена');
+  res.json({ message: 'Категория удалена' });
+});
+
 app.get('/api/products', async (req, res) => {
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
   if (search.length > 200) fail(400, 'Слишком длинная строка поиска');
   const categoryId = req.query.categoryId === undefined
     ? null : positiveId(req.query.categoryId, 'Категория');
   const result = await pool.query(`
-    SELECT id, category_id AS "categoryId", name, price_cents AS "priceCents", stock
-    FROM products
-    WHERE ($1::text = '' OR name ILIKE '%' || $1 || '%')
-      AND ($2::integer IS NULL OR category_id = $2)
-    ORDER BY id
+    SELECT p.id, p.category_id AS "categoryId", p.name,
+           p.price_cents AS "priceCents", p.stock,
+           COALESCE((
+             SELECT SUM(od.quantity)::integer
+             FROM order_details od
+             JOIN orders o ON o.id = od.order_id
+             WHERE od.product_id = p.id AND o.status = 'Новый'
+           ), 0) AS "unitsInOrder"
+    FROM products p
+    WHERE ($1::text = '' OR p.name ILIKE '%' || $1 || '%')
+      AND ($2::integer IS NULL OR p.category_id = $2)
+    ORDER BY p.id
   `, [search, categoryId]);
   res.json(result.rows.map(productJson));
 });
@@ -204,16 +233,18 @@ app.get('/api/orders', async (_req, res) => {
 });
 
 // Все операции оформления заказа выполняются одной транзакцией.
-app.post('/api/orders', async (req, res) => {
-  if (!isObject(req.body)) fail(400, 'Передай JSON-объект заказа');
-  const customer = requiredText(req.body.customer, 'Клиент');
-  const employee = requiredText(req.body.employee, 'Сотрудник');
-  const shipAddress = optionalText(req.body.shipAddress, 'Адрес доставки', 1000) || 'Самовывоз';
-  const discount = discountToHundredths(req.body.discountPercent ?? 0);
-  if (!Array.isArray(req.body.items) || req.body.items.length < 1 || req.body.items.length > 100) {
+// Проверка данных заказа одинакова для создания и редактирования.
+function validateOrder(body) {
+  if (!isObject(body)) fail(400, 'Передай JSON-объект заказа');
+  const customer = requiredText(body.customer, 'Клиент');
+  const employee = requiredText(body.employee, 'Сотрудник');
+  const shipName = requiredText(body.shipName, 'Наименование магазина');
+  const shipAddress = requiredText(body.shipAddress, 'Адрес магазина', 1000);
+  const discount = discountToHundredths(body.discountPercent ?? 0);
+  if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > 100) {
     fail(400, 'Заказ должен содержать от 1 до 100 разных товаров');
   }
-  const items = req.body.items.map((item) => {
+  const items = body.items.map((item) => {
     if (!isObject(item)) fail(400, 'Некорректная позиция заказа');
     const productId = positiveId(item.productId, 'ID товара');
     const quantity = nonnegativeInt(item.quantity, 'Количество');
@@ -224,6 +255,18 @@ app.post('/api/orders', async (req, res) => {
     fail(400, 'Один товар нельзя передавать несколькими позициями');
   }
   items.sort((a, b) => a.productId - b.productId);
+  return { customer, employee, shipName, shipAddress, discount, items };
+}
+
+// Итог позиции считается в целых копейках по цене на момент сохранения заказа.
+function calcLineCents(priceCents, quantity, discount) {
+  const result = (BigInt(priceCents) * BigInt(quantity) * BigInt(10000 - discount) + 5000n) / 10000n;
+  if (result > BigInt(Number.MAX_SAFE_INTEGER)) fail(400, 'Слишком большая сумма заказа');
+  return Number(result);
+}
+
+app.post('/api/orders', async (req, res) => {
+  const { customer, employee, shipName, shipAddress, discount, items } = validateOrder(req.body);
 
   const client = await pool.connect();
   try {
@@ -241,16 +284,8 @@ app.post('/api/orders', async (req, res) => {
       if (product.stock < item.quantity) {
         fail(409, `Товара «${product.name}» недостаточно на складе (осталось ${product.stock} шт.)`);
       }
-      // BigInt сохраняет точность при вычислениях в целых копейках.
-      const exactLineCents = (
-        BigInt(product.price_cents) * BigInt(item.quantity) * BigInt(10000 - discount)
-        + 5000n
-      ) / 10000n;
-      if (exactLineCents > BigInt(Number.MAX_SAFE_INTEGER) ||
-          BigInt(totalCents) + exactLineCents > BigInt(Number.MAX_SAFE_INTEGER)) {
-        fail(400, 'Слишком большая сумма заказа');
-      }
-      const lineTotalCents = Number(exactLineCents);
+      const lineTotalCents = calcLineCents(product.price_cents, item.quantity, discount);
+      if (totalCents + lineTotalCents > Number.MAX_SAFE_INTEGER) fail(400, 'Слишком большая сумма заказа');
       totalCents += lineTotalCents;
       lines.push({ ...item, product, lineTotalCents });
     }
@@ -258,7 +293,7 @@ app.post('/api/orders', async (req, res) => {
     const insertOrder = await client.query(`
       INSERT INTO orders (customer, employee, ship_name, ship_address, total_cents)
       VALUES ($1, $2, $3, $4, $5) RETURNING id
-    `, [customer, employee, customer, shipAddress, totalCents]);
+    `, [customer, employee, shipName, shipAddress, totalCents]);
     const orderId = insertOrder.rows[0].id;
 
     for (const line of lines) {
@@ -274,6 +309,102 @@ app.post('/api/orders', async (req, res) => {
     }
     await client.query('COMMIT');
     res.status(201).json({ id: orderId, status: 'Новый', totalCents });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+// Изменять состав можно только у нового заказа: отгруженный заказ фиксирует совершённую продажу.
+// При редактировании прежние количества возвращаются в расчёт доступного остатка.
+app.put('/api/orders/:id', async (req, res) => {
+  const orderId = parseRowId(req);
+  const input = validateOrder(req.body);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query('SELECT id, status FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+    if (existing.rowCount === 0) fail(404, 'Заказ не найден');
+    if (existing.rows[0].status !== 'Новый') fail(409, 'Отгруженный заказ нельзя изменить');
+
+    const oldDetails = await client.query(
+      'SELECT product_id, quantity FROM order_details WHERE order_id = $1 ORDER BY product_id', [orderId]
+    );
+    const oldQty = new Map(oldDetails.rows.map((row) => [row.product_id, row.quantity]));
+    const productIds = [...new Set([...oldQty.keys(), ...input.items.map((x) => x.productId)])].sort((a, b) => a - b);
+    const locked = await client.query(
+      'SELECT id, name, price_cents, stock FROM products WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE',
+      [productIds]
+    );
+    const byId = new Map(locked.rows.map((row) => [row.id, row]));
+    let totalCents = 0;
+    const lines = [];
+    for (const item of input.items) {
+      const product = byId.get(item.productId);
+      if (!product) fail(404, `Товар №${item.productId} не найден`);
+      if (item.quantity > product.stock + (oldQty.get(item.productId) || 0)) {
+        fail(409, `Товара «${product.name}» недостаточно на складе`);
+      }
+      const lineTotalCents = calcLineCents(product.price_cents, item.quantity, input.discount);
+      if (totalCents + lineTotalCents > Number.MAX_SAFE_INTEGER) fail(400, 'Слишком большая сумма заказа');
+      totalCents += lineTotalCents;
+      lines.push({ ...item, product, lineTotalCents });
+    }
+
+    await client.query('DELETE FROM order_details WHERE order_id = $1', [orderId]);
+    for (const productId of productIds) {
+      const newQty = input.items.find((item) => item.productId === productId)?.quantity || 0;
+      const adjustment = (oldQty.get(productId) || 0) - newQty;
+      if (adjustment !== 0) {
+        await client.query('UPDATE products SET stock = stock + $1 WHERE id = $2', [adjustment, productId]);
+      }
+    }
+    for (const line of lines) {
+      await client.query(`
+        INSERT INTO order_details
+          (order_id, product_id, product_name, quantity, unit_price_cents,
+           discount_hundredths, line_total_cents)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [orderId, line.productId, line.product.name, line.quantity,
+          line.product.price_cents, input.discount, line.lineTotalCents]);
+    }
+    await client.query(`
+      UPDATE orders SET customer = $1, employee = $2, ship_name = $3,
+        ship_address = $4, total_cents = $5 WHERE id = $6
+    `, [input.customer, input.employee, input.shipName, input.shipAddress, totalCents, orderId]);
+    await client.query('COMMIT');
+    res.json({ id: orderId, status: 'Новый', totalCents });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+// Удаление нового заказа освобождает списанные остатки.
+// Удаление отгруженного не возвращает товар на склад, потому что он уже продан.
+app.delete('/api/orders/:id', async (req, res) => {
+  const orderId = parseRowId(req);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query('SELECT id, status FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+    if (existing.rowCount === 0) fail(404, 'Заказ не найден');
+    if (existing.rows[0].status === 'Новый') {
+      const details = await client.query(
+        'SELECT product_id, quantity FROM order_details WHERE order_id = $1 ORDER BY product_id', [orderId]
+      );
+      for (const detail of details.rows) {
+        await client.query('UPDATE products SET stock = stock + $1 WHERE id = $2',
+          [detail.quantity, detail.product_id]);
+      }
+    }
+    await client.query('DELETE FROM orders WHERE id = $1', [orderId]);
+    await client.query('COMMIT');
+    res.json({ message: 'Заказ удалён' });
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
